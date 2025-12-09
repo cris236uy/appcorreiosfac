@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta
-# Importe a biblioteca do Gemini (o nome exato pode variar dependendo da versão)
 from google import genai 
 from google.genai.errors import APIError 
 
@@ -10,21 +9,23 @@ from google.genai.errors import APIError
 def initialize_session_state():
     """Inicializa DataFrames e estados necessários."""
     if 'habits_df' not in st.session_state:
+        # Hábito: Nome, Unidade Atômica (Mínimo), Ativo
         st.session_state.habits_df = pd.DataFrame({
             'Hábito': ['Correr 5km', 'Ler 10 páginas', 'Estudo Silencioso 1h'],
             'Unidade Atômica': ['Colocar tênis', 'Ler 1 parágrafo', 'Abrir o livro'],
             'Ativo': [True, True, True]
         })
     if 'records_df' not in st.session_state:
+        # Data: Data do registro, Hábito: Nome, Status: Concluído/Falhou, Comentários
         st.session_state.records_df = pd.DataFrame(columns=['Data', 'Hábito', 'Status', 'Comentários'])
         st.session_state.records_df['Data'] = pd.to_datetime(st.session_state.records_df['Data'])
     else:
+        # Garante que a coluna Data é um objeto datetime
         st.session_state.records_df['Data'] = pd.to_datetime(st.session_state.records_df['Data'])
 
 
 def calculate_streak(records_df, habit_name):
     """Calcula a sequência atual (streak) e a melhor sequência (best_streak) para um hábito."""
-    # Lógica de calculate_streak (A mesma da versão anterior, omitida aqui por concisão)
     successful_records = records_df[
         (records_df['Hábito'] == habit_name) & 
         (records_df['Status'] == 'Concluído')
@@ -37,11 +38,9 @@ def calculate_streak(records_df, habit_name):
     dates_list = sorted(list(dates))
 
     current_streak = 0
-    best_streak = 0
     
     today = date.today()
     was_done_today = today in dates_list
-    
     current_date_check = today if was_done_today else today - timedelta(days=1)
     
     temp_streak = 0
@@ -84,7 +83,7 @@ def generate_sermon(habit_name, excuse_text, api_key):
         # O prompt do Goggins
         prompt = f"""
         Você é um assistente de responsabilidade e disciplina no estilo de David Goggins.
-        Sua tarefa é ser brutalmente honesto, motivacional e punitivo.
+        Sua tarefa é ser brutalmente honesto, motivacional e punitivo. Fale sempre em português.
         
         O usuário falhou na tarefa: '{habit_name}'.
         A desculpa dada foi: '{excuse_text}'.
@@ -141,11 +140,10 @@ if 'gemini_api_key' not in st.session_state or not st.session_state.gemini_api_k
         if api_key_input.strip():
             st.session_state.gemini_api_key = api_key_input.strip()
             st.toast("Chave API salva! O modo Goggins está ativado.", icon="🔥")
-            st.rerun() # Recarrega para limpar o campo de input
+            st.rerun()
         else:
             st.error("Por favor, insira uma chave válida.")
             
-    # Se a chave não estiver configurada, pare o resto do aplicativo
     st.stop() 
 
 # --- 3. Estrutura de Abas (Só aparece após a chave ser salva) ---
@@ -185,7 +183,7 @@ with tab1:
                 st.success(f"✅ **CONCLUÍDO HOJE!** Você fez o que devia. *({comment})*")
             else:
                 st.error(f"❌ **FALHOU HOJE.** Olhe para o espelho. Seu sermão está abaixo.")
-                st.code(comment, language='markdown') # Exibe o sermão gerado
+                st.code(comment, language='markdown')
             st.markdown("---")
             continue
 
@@ -213,7 +211,6 @@ with tab1:
                                     st.session_state.gemini_api_key
                                 )
                             
-                            # Registra o resultado do Gemini como o 'Comentário'
                             new_record = {'Data': today, 'Hábito': habit, 'Status': 'Falhou', 'Comentários': sermon_and_punishment}
                             st.session_state.records_df = pd.concat([st.session_state.records_df, pd.DataFrame([new_record])], ignore_index=True)
                             st.rerun()
@@ -222,9 +219,8 @@ with tab1:
         
         st.markdown("---")
 
-
 # ==============================================================================
-#                             TAB 2 E 3 (Inalteradas)
+#                             TAB 2: PAINEL DE CONTROLE
 # ==============================================================================
 with tab2:
     st.header("📈 Seu Desempenho: O Espelho da Responsabilidade")
@@ -233,6 +229,7 @@ with tab2:
     if st.session_state.records_df.empty:
         st.info("Ainda não há registros de hábitos. Comece a rastrear!")
     else:
+        # Tabela de Streaks 
         st.subheader("Sequências (Streaks)")
         streak_data = []
         for habit in st.session_state.habits_df[st.session_state.habits_df['Ativo'] == True]['Hábito']:
@@ -247,7 +244,9 @@ with tab2:
         
         st.markdown("---")
         
+        # Gráfico de Sucesso Mensal
         st.subheader("Taxa de Sucesso nos Últimos 30 Dias")
+        
         last_30_days = date.today() - timedelta(days=30)
         recent_records = st.session_state.records_df[st.session_state.records_df['Data'].dt.date >= last_30_days].copy()
         
@@ -263,9 +262,13 @@ with tab2:
         else:
             st.info("Dados insuficientes nos últimos 30 dias para gerar o gráfico.")
 
+# ==============================================================================
+#                             TAB 3: GERENCIAR HÁBITOS
+# ==============================================================================
 with tab3:
     st.header("⚙️ Gerenciar Minhas Missões (Hábitos)")
     
+    # --- Adicionar Novo Hábito ---
     st.subheader("➕ Adicionar Nova Missão")
     with st.form("new_habit_form"):
         new_habit_name = st.text_input("Nome do Hábito/Missão (Ex: Meditar 10min)")
@@ -283,20 +286,54 @@ with tab3:
 
     st.markdown("---")
 
+    # --- Edição e Desativação (Usando st.data_editor) ---
     st.subheader("📚 Lista de Hábitos Atuais")
+    st.caption("Altere a coluna 'Ativo' para pausar ou reativar um hábito.")
     
-    st.dataframe(
-        st.session_state.habits_df.set_index('Hábito'),
+    editor_df = st.session_state.habits_df.set_index('Hábito')
+    
+    edited_df = st.data_editor(
+        editor_df,
         column_order=('Ativo', 'Unidade Atômica'),
         column_config={
             "Ativo": st.column_config.CheckboxColumn("Ativo?", default=True),
             "Unidade Atômica": st.column_config.TextColumn("Unidade Atômica Mínima", help="O Mínimo para começar (Atomic Habit)")
         },
         hide_index=False,
-        use_container_width=True
+        use_container_width=True,
+        key="habit_editor"
+    )
+
+    # Salva as alterações do editor de volta ao estado
+    st.session_state.habits_df = edited_df.reset_index()
+
+    st.markdown("---")
+    
+    # --- Remoção Definitiva ---
+    st.subheader("🗑️ Remover Definitivamente (Cuidado!)")
+    st.error("Remover um hábito apagará permanentemente o seu acompanhamento e histórico de registros.")
+    
+    habits_to_remove = st.session_state.habits_df['Hábito'].tolist()
+    
+    habit_to_delete = st.selectbox(
+        "Selecione o Hábito para Remoção:",
+        options=[''] + habits_to_remove,
+        key="delete_select"
     )
     
-    st.caption("Para atualização persistente, você precisará salvar o DataFrame em um arquivo (ex: CSV) e recarregá-lo na inicialização do app.")
+    if st.button(f"🔴 REMOVER '{habit_to_delete}' (Irreversível)", disabled=(habit_to_delete == '')):
+        # Filtra o records_df para remover o histórico
+        st.session_state.records_df = st.session_state.records_df[
+            st.session_state.records_df['Hábito'] != habit_to_delete
+        ]
+        
+        # Filtra o habits_df para remover o hábito em si
+        st.session_state.habits_df = st.session_state.habits_df[
+            st.session_state.habits_df['Hábito'] != habit_to_delete
+        ].reset_index(drop=True)
+        
+        st.warning(f"O Hábito '{habit_to_delete}' e todo o seu histórico foram removidos.")
+        st.rerun()
 
 # --- FIM DO APP ---
 st.markdown("---")
