@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import date, timedelta
 from google import genai 
 from google.genai.errors import APIError 
+from io import BytesIO
 
 # --- 1. Funções de Suporte ---
 
@@ -74,13 +75,11 @@ def calculate_streak(records_df, habit_name):
 
 
 def generate_sermon(habit_name, excuse_text, api_key):
-    """Gera um sermão e punição usando a API do Gemini."""
+    """Gera um sermão e punição para falha diária usando a API do Gemini."""
     
     try:
-        # Configura o cliente Gemini
         client = genai.Client(api_key=api_key)
         
-        # O prompt do Goggins
         prompt = f"""
         Você é um assistente de responsabilidade e disciplina no estilo de David Goggins.
         Sua tarefa é ser brutalmente honesto, motivacional e punitivo. Fale sempre em português.
@@ -113,6 +112,68 @@ def generate_sermon(habit_name, excuse_text, api_key):
         return f"ERRO NA API GEMINI: Falha na comunicação. Verifique a chave e o status da API. Detalhes: {e}"
     except Exception as e:
         return f"ERRO INESPERADO: {e}"
+
+
+def generate_weekly_report(api_key, records_df):
+    """Gera um relatório semanal de desempenho usando a API do Gemini."""
+    
+    if records_df.empty:
+        return "Nenhum dado encontrado para gerar um relatório."
+    
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        # Filtra os dados da última semana (7 dias)
+        last_week = date.today() - timedelta(days=7)
+        recent_records = records_df[records_df['Data'].dt.date >= last_week]
+
+        # Formata os dados para o prompt
+        data_string = recent_records[['Data', 'Hábito', 'Status']].to_string(index=False)
+        
+        prompt = f"""
+        Você é o David Goggins. Sua missão é fazer uma análise de desempenho semanal para o usuário com base nos dados brutos.
+        
+        **Dados de Desempenho (Últimos 7 dias):**
+        {data_string}
+        
+        Sua análise em português deve:
+        1.  Dar um veredito geral: A semana foi **IMPLACÁVEL** (Se > 90% Concluído), **ACEITÁVEL** (Se 70-90%), ou **FRACA** (Se < 70%).
+        2.  Apontar o hábito mais consistente (vitória) e o ponto mais fraco (falha).
+        3.  Concluir com um plano de ação Goggins-style para a próxima semana (Um desafio a ser superado).
+        
+        Formate a resposta estritamente da seguinte maneira:
+        ---
+        📊 VEREDITO DA SEMANA: [Seu veredito aqui]
+        
+        ANÁLISE BRUTAL
+        [Sua análise detalhada aqui]
+        
+        🚀 CHAMADA PARA AÇÃO
+        [O desafio da próxima semana aqui]
+        ---
+        """
+        
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt
+        )
+        
+        return response.text
+
+    except APIError as e:
+        return f"ERRO NA API GEMINI: Falha na comunicação ao gerar o relatório. Verifique a chave e o status da API. Detalhes: {e}"
+    except Exception as e:
+        return f"ERRO INESPERADO: {e}"
+
+
+def to_excel(df):
+    """Converte o DataFrame para um objeto BytesIO do Excel."""
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='RegistroHabitos')
+    processed_data = output.getvalue()
+    return processed_data
+
 
 # --- 2. Configuração e Inicialização ---
 
@@ -203,7 +264,6 @@ with tab1:
                     
                     if st.form_submit_button("Gerar Sermão e Registrar Falha 📉"):
                         if excuse_input:
-                            # Chama o Gemini para gerar o sermão
                             with st.spinner("Gerando Sermão e Punição..."):
                                 sermon_and_punishment = generate_sermon(
                                     habit, 
@@ -220,16 +280,26 @@ with tab1:
         st.markdown("---")
 
 # ==============================================================================
-#                             TAB 2: PAINEL DE CONTROLE
+#                             TAB 2: PAINEL DE CONTROLE E RELATÓRIO
 # ==============================================================================
 with tab2:
     st.header("📈 Seu Desempenho: O Espelho da Responsabilidade")
-    st.markdown("Este painel não mente. Ele mostra a consistência brutal.")
     
     if st.session_state.records_df.empty:
         st.info("Ainda não há registros de hábitos. Comece a rastrear!")
     else:
-        # Tabela de Streaks 
+        # --- Relatório Semanal ---
+        st.subheader("🔥 Análise Semanal (IA)")
+        if st.button("Gerar Relatório Semanal de Responsabilidade", type="primary"):
+            with st.spinner("Gerando Análise Brutal..."):
+                report = generate_weekly_report(st.session_state.gemini_api_key, st.session_state.records_df)
+            
+            st.markdown("### Relatório de Desempenho (Últimos 7 Dias)")
+            st.code(report, language='markdown')
+        
+        st.markdown("---")
+
+        # --- Tabela de Streaks ---
         st.subheader("Sequências (Streaks)")
         streak_data = []
         for habit in st.session_state.habits_df[st.session_state.habits_df['Ativo'] == True]['Hábito']:
@@ -244,9 +314,8 @@ with tab2:
         
         st.markdown("---")
         
-        # Gráfico de Sucesso Mensal
+        # --- Gráfico de Sucesso Mensal ---
         st.subheader("Taxa de Sucesso nos Últimos 30 Dias")
-        
         last_30_days = date.today() - timedelta(days=30)
         recent_records = st.session_state.records_df[st.session_state.records_df['Data'].dt.date >= last_30_days].copy()
         
@@ -261,6 +330,18 @@ with tab2:
                          use_container_width=True)
         else:
             st.info("Dados insuficientes nos últimos 30 dias para gerar o gráfico.")
+            
+        st.markdown("---")
+        
+        # --- Exportar para Excel ---
+        st.subheader("💾 Exportar Dados")
+        df_xlsx = to_excel(st.session_state.records_df)
+        st.download_button(
+            label="Baixar Histórico Completo em Excel (.xlsx)",
+            data=df_xlsx,
+            file_name=f'RegistroHabitos_Export_{date.today().strftime("%Y%m%d")}.xlsx',
+            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
 # ==============================================================================
 #                             TAB 3: GERENCIAR HÁBITOS
@@ -304,7 +385,6 @@ with tab3:
         key="habit_editor"
     )
 
-    # Salva as alterações do editor de volta ao estado
     st.session_state.habits_df = edited_df.reset_index()
 
     st.markdown("---")
@@ -322,12 +402,10 @@ with tab3:
     )
     
     if st.button(f"🔴 REMOVER '{habit_to_delete}' (Irreversível)", disabled=(habit_to_delete == '')):
-        # Filtra o records_df para remover o histórico
         st.session_state.records_df = st.session_state.records_df[
             st.session_state.records_df['Hábito'] != habit_to_delete
         ]
         
-        # Filtra o habits_df para remover o hábito em si
         st.session_state.habits_df = st.session_state.habits_df[
             st.session_state.habits_df['Hábito'] != habit_to_delete
         ].reset_index(drop=True)
