@@ -192,7 +192,7 @@ st.title("🔥 O Espelho da Responsabilidade (David Goggins Style)")
 st.markdown("---")
 
 # ==============================================================================
-#                             CONFIGURAÇÃO DE CHAVE API
+#                      CONFIGURAÇÃO DE CHAVE API
 # ==============================================================================
 
 if 'gemini_api_key' not in st.session_state or not st.session_state.gemini_api_key:
@@ -219,7 +219,7 @@ if 'gemini_api_key' not in st.session_state or not st.session_state.gemini_api_k
 tab1, tab2, tab3 = st.tabs(["🎯 Get After It (Hoje)", "📈 Painel de Controle", "⚙️ Gerenciar Hábitos"])
 
 # ==============================================================================
-#                             TAB 1: REGISTRO DIÁRIO
+#                       TAB 1: REGISTRO DIÁRIO
 # ==============================================================================
 with tab1:
     st.header("Missão de Hoje: Sem Desculpas.")
@@ -288,7 +288,7 @@ with tab1:
         st.markdown("---")
 
 # ==============================================================================
-#                             TAB 2: PAINEL DE CONTROLE E RELATÓRIO
+#                       TAB 2: PAINEL DE CONTROLE E RELATÓRIO
 # ==============================================================================
 with tab2:
     st.header("📈 Seu Desempenho: O Espelho da Responsabilidade")
@@ -352,7 +352,7 @@ with tab2:
         )
 
 # ==============================================================================
-#                             TAB 3: GERENCIAR HÁBITOS
+#                       TAB 3: GERENCIAR HÁBITOS
 # ==============================================================================
 with tab3:
     st.header("⚙️ Gerenciar Minhas Missões (Hábitos)")
@@ -425,11 +425,14 @@ with tab3:
     st.subheader("📚 Lista de Hábitos Atuais")
     st.caption("Altere a coluna 'Ativo' para pausar ou reativar um hábito.")
     
-    # Verifica se o DataFrame está vazio antes de tentar o set_index
+    # CORREÇÃO PARA O KEYERROR: GARANTIR QUE O ÍNDICE SEJA 'Hábito' MESMO SE VAZIO
     if not st.session_state.habits_df.empty:
         editor_df = st.session_state.habits_df.set_index('Hábito')
     else:
-        editor_df = pd.DataFrame(columns=['Unidade Atômica', 'Ativo']) # DataFrame vazio para evitar erro
+        # Cria um DF vazio, mas define o nome do índice como 'Hábito'
+        editor_df = pd.DataFrame(columns=['Unidade Atômica', 'Ativo']) 
+        editor_df.index.name = 'Hábito' # <--- CHAVE DA CORREÇÃO
+        
 
     edited_df = st.data_editor(
         editor_df,
@@ -451,6 +454,7 @@ with tab3:
     st.subheader("🗑️ Remover Definitivamente (Cuidado!)")
     st.error("Remover um hábito apagará permanentemente o seu acompanhamento e histórico de registros.")
     
+    # A linha abaixo agora é segura porque 'Hábito' é garantido no DF após a correção
     habits_to_remove = st.session_state.habits_df['Hábito'].tolist()
     
     habit_to_delete = st.selectbox(
