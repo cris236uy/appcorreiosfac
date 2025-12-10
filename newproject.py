@@ -4,6 +4,7 @@ from datetime import date, timedelta
 from google import genai 
 from google.genai.errors import APIError 
 from io import BytesIO
+import xlsxwriter # Necessário para o pandas exportar para xlsx
 
 # --- 1. Funções de Suporte ---
 
@@ -11,11 +12,12 @@ def initialize_session_state():
     """Inicializa DataFrames e estados necessários."""
     if 'habits_df' not in st.session_state:
         # Hábito: Nome, Unidade Atômica (Mínimo), Ativo
+        # INICIA VAZIO, conforme solicitado.
         st.session_state.habits_df = pd.DataFrame({
-            'Hábito': ['Correr 5km', 'Ler 10 páginas', 'Estudo Silencioso 1h'],
-            'Unidade Atômica': ['Colocar tênis', 'Ler 1 parágrafo', 'Abrir o livro'],
-            'Ativo': [True, True, True]
-        })
+            'Hábito': pd.Series(dtype='str'),
+            'Unidade Atômica': pd.Series(dtype='str'),
+            'Ativo': pd.Series(dtype='bool')
+        }) 
     if 'records_df' not in st.session_state:
         # Data: Data do registro, Hábito: Nome, Status: Concluído/Falhou, Comentários
         st.session_state.records_df = pd.DataFrame(columns=['Data', 'Hábito', 'Status', 'Comentários'])
@@ -127,6 +129,9 @@ def generate_weekly_report(api_key, records_df):
         last_week = date.today() - timedelta(days=7)
         recent_records = records_df[records_df['Data'].dt.date >= last_week]
 
+        if recent_records.empty:
+            return "Nenhum registro de hábito nos últimos 7 dias. Comece a trabalhar!"
+
         # Formata os dados para o prompt
         data_string = recent_records[['Data', 'Hábito', 'Status']].to_string(index=False)
         
@@ -166,11 +171,14 @@ def generate_weekly_report(api_key, records_df):
         return f"ERRO INESPERADO: {e}"
 
 
-def to_excel(df):
-    """Converte o DataFrame para um objeto BytesIO do Excel."""
+def to_excel(habits_df, records_df):
+    """Converte os DataFrames para um objeto BytesIO do Excel em abas separadas."""
     output = BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='RegistroHabitos')
+        # Aba para o registro de histórico
+        records_df.to_excel(writer, index=False, sheet_name='RegistroHabitos')
+        # Aba para a lista de hábitos
+        habits_df.to_excel(writer, index=False, sheet_name='Habits') 
     processed_data = output.getvalue()
     return processed_data
 
@@ -335,7 +343,7 @@ with tab2:
         
         # --- Exportar para Excel ---
         st.subheader("💾 Exportar Dados")
-        df_xlsx = to_excel(st.session_state.records_df)
+        df_xlsx = to_excel(st.session_state.habits_df, st.session_state.records_df)
         st.download_button(
             label="Baixar Histórico Completo em Excel (.xlsx)",
             data=df_xlsx,
@@ -348,6 +356,52 @@ with tab2:
 # ==============================================================================
 with tab3:
     st.header("⚙️ Gerenciar Minhas Missões (Hábitos)")
+
+    # --- Importar Dados de Excel ---
+    st.subheader("📥 Importar Dados de Excel")
+    st.info("Você pode importar hábitos (aba 'Habits') e/ou histórico (aba 'RegistroHabitos') de um arquivo Excel. Os dados importados serão mesclados com os existentes, substituindo duplicatas pela última entrada.")
+    
+    uploaded_file = st.file_uploader("Escolha um arquivo Excel (.xlsx)", type="xlsx", key="excel_uploader")
+    
+    if uploaded_file:
+        try:
+            xls = pd.ExcelFile(uploaded_file)
+            
+            # --- Importar Hábitos ---
+            if 'Habits' in xls.sheet_names:
+                df_habits = xls.parse('Habits')
+                required_cols = ['Hábito', 'Unidade Atômica', 'Ativo']
+                
+                if all(col in df_habits.columns for col in required_cols):
+                    df_habits['Ativo'] = df_habits['Ativo'].astype(bool)
+                    # Concatena e remove duplicatas com base no 'Hábito'
+                    st.session_state.habits_df = pd.concat([st.session_state.habits_df, df_habits]).drop_duplicates(subset=['Hábito'], keep='last').reset_index(drop=True)
+                    st.success(f"Hábitos importados com sucesso! {len(df_habits)} entradas processadas.")
+                else:
+                    st.error(f"A aba 'Habits' deve conter as colunas: {', '.join(required_cols)}.")
+
+            # --- Importar Registros ---
+            if 'RegistroHabitos' in xls.sheet_names:
+                df_records = xls.parse('RegistroHabitos')
+                
+                required_cols_records = ['Data', 'Hábito', 'Status', 'Comentários']
+                if all(col in df_records.columns for col in required_cols_records):
+                    df_records['Data'] = pd.to_datetime(df_records['Data'], errors='coerce')
+                    # Remove linhas com data inválida
+                    df_records.dropna(subset=['Data'], inplace=True) 
+
+                    # Concatena e remove duplicatas com base em 'Data' e 'Hábito'
+                    st.session_state.records_df = pd.concat([st.session_state.records_df, df_records]).drop_duplicates(subset=['Data', 'Hábito'], keep='last').reset_index(drop=True)
+                    st.success(f"Registros de histórico importados com sucesso! {len(df_records)} registros processados.")
+                else:
+                    st.error(f"A aba 'RegistroHabitos' deve conter as colunas: {', '.join(required_cols_records)}.")
+            
+            st.rerun() # Recarrega após a importação para refletir as mudanças
+
+        except Exception as e:
+            st.error(f"Erro ao ler o arquivo Excel: {e}. Certifique-se de que o arquivo está no formato correto.")
+
+    st.markdown("---")
     
     # --- Adicionar Novo Hábito ---
     st.subheader("➕ Adicionar Nova Missão")
@@ -358,11 +412,11 @@ with tab3:
         submitted = st.form_submit_button("Adicionar Hábito")
         if submitted and new_habit_name:
             if new_habit_name in st.session_state.habits_df['Hábito'].values:
-                st.warning("Este hábito já existe.")
+                st.warning("Este hábito já existe. Edite-o na tabela abaixo.")
             else:
                 new_row = pd.DataFrame([{'Hábito': new_habit_name, 'Unidade Atômica': new_atomic_unit, 'Ativo': True}])
                 st.session_state.habits_df = pd.concat([st.session_state.habits_df, new_row], ignore_index=True)
-                st.success(f"Hábito '{new_habit_name}' adicionado! Agora vá executá-lo.")
+                st.success(f"Hábito '{new_habit_name}' adicionado!")
                 st.rerun()
 
     st.markdown("---")
@@ -371,8 +425,12 @@ with tab3:
     st.subheader("📚 Lista de Hábitos Atuais")
     st.caption("Altere a coluna 'Ativo' para pausar ou reativar um hábito.")
     
-    editor_df = st.session_state.habits_df.set_index('Hábito')
-    
+    # Verifica se o DataFrame está vazio antes de tentar o set_index
+    if not st.session_state.habits_df.empty:
+        editor_df = st.session_state.habits_df.set_index('Hábito')
+    else:
+        editor_df = pd.DataFrame(columns=['Unidade Atômica', 'Ativo']) # DataFrame vazio para evitar erro
+
     edited_df = st.data_editor(
         editor_df,
         column_order=('Ativo', 'Unidade Atômica'),
