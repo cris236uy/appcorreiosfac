@@ -4,477 +4,204 @@ from datetime import date, timedelta
 from google import genai 
 from google.genai.errors import APIError 
 from io import BytesIO
-import xlsxwriter # Necessário para o pandas exportar para xlsx
+import xlsxwriter
 
-# --- 1. Funções de Suporte ---
+# --- 1. Funções de Suporte e Lógica de IA ---
 
 def initialize_session_state():
     """Inicializa DataFrames e estados necessários."""
     if 'habits_df' not in st.session_state:
-        # Hábito: Nome, Unidade Atômica (Mínimo), Ativo
-        # INICIA VAZIO, conforme solicitado.
         st.session_state.habits_df = pd.DataFrame({
             'Hábito': pd.Series(dtype='str'),
             'Unidade Atômica': pd.Series(dtype='str'),
             'Ativo': pd.Series(dtype='bool')
         }) 
     if 'records_df' not in st.session_state:
-        # Data: Data do registro, Hábito: Nome, Status: Concluído/Falhou, Comentários
         st.session_state.records_df = pd.DataFrame(columns=['Data', 'Hábito', 'Status', 'Comentários'])
         st.session_state.records_df['Data'] = pd.to_datetime(st.session_state.records_df['Data'])
-    else:
-        # Garante que a coluna Data é um objeto datetime
-        st.session_state.records_df['Data'] = pd.to_datetime(st.session_state.records_df['Data'])
-
+    
+    if 'suggestion' not in st.session_state:
+        st.session_state.suggestion = None
 
 def calculate_streak(records_df, habit_name):
-    """Calcula a sequência atual (streak) e a melhor sequência (best_streak) para um hábito."""
+    """Calcula a sequência atual e a melhor sequência."""
     successful_records = records_df[
-        (records_df['Hábito'] == habit_name) & 
-        (records_df['Status'] == 'Concluído')
+        (records_df['Hábito'] == habit_name) & (records_df['Status'] == 'Concluído')
     ].sort_values(by='Data', ascending=True).copy()
 
     if successful_records.empty:
         return 0, 0
 
-    dates = successful_records['Data'].dt.date.unique()
-    dates_list = sorted(list(dates))
-
+    dates_list = sorted(list(successful_records['Data'].dt.date.unique()))
+    
+    # Streak Atual
     current_streak = 0
-    
     today = date.today()
-    was_done_today = today in dates_list
-    current_date_check = today if was_done_today else today - timedelta(days=1)
+    check_date = today if today in dates_list else today - timedelta(days=1)
     
-    temp_streak = 0
     for i in range(len(dates_list) - 1, -1, -1):
-        d = dates_list[i]
-        
-        if d == current_date_check:
-            temp_streak += 1
-            current_date_check -= timedelta(days=1)
-        elif d < current_date_check:
-            break
+        if dates_list[i] == check_date:
+            current_streak += 1
+            check_date -= timedelta(days=1)
+        else: break
             
-    current_streak = temp_streak
-    
-    max_streak = 0
-    if not dates_list:
-        return current_streak, 0
-    
-    temp_max_streak = 1
-    
+    # Melhor Streak
+    max_streak, temp_max = 0, 1
     for i in range(1, len(dates_list)):
         if dates_list[i] == dates_list[i-1] + timedelta(days=1):
-            temp_max_streak += 1
+            temp_max += 1
         else:
-            max_streak = max(max_streak, temp_max_streak)
-            temp_max_streak = 1
-            
-    max_streak = max(max_streak, temp_max_streak)
+            max_streak = max(max_streak, temp_max)
+            temp_max = 1
+    max_streak = max(max_streak, temp_max)
     
     return current_streak, max_streak
 
-
-def generate_sermon(habit_name, excuse_text, api_key):
-    """Gera um sermão e punição para falha diária usando a API do Gemini."""
-    
+def call_gemini(prompt, api_key):
+    """Função genérica para chamadas à API Gemini."""
     try:
         client = genai.Client(api_key=api_key)
-        
-        prompt = f"""
-        Você é um assistente de responsabilidade e disciplina no estilo de David Goggins.
-        Sua tarefa é ser brutalmente honesto, motivacional e punitivo. Fale sempre em português.
-        
-        O usuário falhou na tarefa: '{habit_name}'.
-        A desculpa dada foi: '{excuse_text}'.
-        
-        Gere uma resposta em português que contenha:
-        1. Um 'Sermão no Espelho' curto e direto, criticando a fraqueza do usuário e a desculpa.
-        2. Uma 'Punição Física' clara e mensurável (algo como flexões, corrida extra, ou banho gelado) para ser feita IMEDIATAMENTE.
-        
-        Formate a resposta estritamente da seguinte maneira:
-        ---
-        🚨 SERMÃO NO ESPELHO
-        [Seu Sermão de Crítica Aqui]
-        
-        ⚖️ PUNIÇÃO IMEDIATA
-        [Sua Punição Clara Aqui]
-        ---
-        """
-
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
+        response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
         return response.text
-    
-    except APIError as e:
-        return f"ERRO NA API GEMINI: Falha na comunicação. Verifique a chave e o status da API. Detalhes: {e}"
     except Exception as e:
-        return f"ERRO INESPERADO: {e}"
+        return f"ERRO: {e}"
 
-
-def generate_weekly_report(api_key, records_df):
-    """Gera um relatório semanal de desempenho usando a API do Gemini."""
+def generate_next_level_suggestion(habit_name, api_key):
+    """Gera uma sugestão de 'Level Up' após concluir um hábito."""
+    prompt = f"""
+    Você é David Goggins. O usuário concluiu: '{habit_name}'.
+    Ele está ficando confortável. Sugira UMA nova missão complementar ou uma evolução MAIS DIFÍCIL.
+    Responda em português.
     
-    if records_df.empty:
-        return "Nenhum dado encontrado para gerar um relatório."
-    
-    try:
-        client = genai.Client(api_key=api_key)
-        
-        # Filtra os dados da última semana (7 dias)
-        last_week = date.today() - timedelta(days=7)
-        recent_records = records_df[records_df['Data'].dt.date >= last_week]
+    Formate estritamente assim:
+    NOME: [Nome da nova missão]
+    MINIMO: [Unidade atômica/mínima]
+    MOTIVACAO: [Frase curta de impacto]
+    """
+    return call_gemini(prompt, api_key)
 
-        if recent_records.empty:
-            return "Nenhum registro de hábito nos últimos 7 dias. Comece a trabalhar!"
+# --- 2. Interface e Layout ---
 
-        # Formata os dados para o prompt
-        data_string = recent_records[['Data', 'Hábito', 'Status']].to_string(index=False)
-        
-        prompt = f"""
-        Você é o David Goggins. Sua missão é fazer uma análise de desempenho semanal para o usuário com base nos dados brutos.
-        
-        **Dados de Desempenho (Últimos 7 dias):**
-        {data_string}
-        
-        Sua análise em português deve:
-        1.  Dar um veredito geral: A semana foi **IMPLACÁVEL** (Se > 90% Concluído), **ACEITÁVEL** (Se 70-90%), ou **FRACA** (Se < 70%).
-        2.  Apontar o hábito mais consistente (vitória) e o ponto mais fraco (falha).
-        3.  Concluir com um plano de ação Goggins-style para a próxima semana (Um desafio a ser superado).
-        
-        Formate a resposta estritamente da seguinte maneira:
-        ---
-        📊 VEREDITO DA SEMANA: [Seu veredito aqui]
-        
-        ANÁLISE BRUTAL
-        [Sua análise detalhada aqui]
-        
-        🚀 CHAMADA PARA AÇÃO
-        [O desafio da próxima semana aqui]
-        ---
-        """
-        
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        
-        return response.text
-
-    except APIError as e:
-        return f"ERRO NA API GEMINI: Falha na comunicação ao gerar o relatório. Verifique a chave e o status da API. Detalhes: {e}"
-    except Exception as e:
-        return f"ERRO INESPERADO: {e}"
-
-
-def to_excel(habits_df, records_df):
-    """Converte os DataFrames para um objeto BytesIO do Excel em abas separadas."""
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # Aba para o registro de histórico
-        records_df.to_excel(writer, index=False, sheet_name='RegistroHabitos')
-        # Aba para a lista de hábitos
-        habits_df.to_excel(writer, index=False, sheet_name='Habits') 
-    processed_data = output.getvalue()
-    return processed_data
-
-
-# --- 2. Configuração e Inicialização ---
-
-st.set_page_config(layout="wide", page_title="Disciplina Implacável | Atomic Goggins")
+st.set_page_config(layout="wide", page_title="Atomic Goggins | Hardcore Discipline")
 initialize_session_state()
 
-st.title("🔥 O Espelho da Responsabilidade (David Goggins Style)")
+st.title("🔥 Disciplina Implacável: O Desafio Goggins")
 st.markdown("---")
 
-# ==============================================================================
-#                      CONFIGURAÇÃO DE CHAVE API
-# ==============================================================================
-
-if 'gemini_api_key' not in st.session_state or not st.session_state.gemini_api_key:
-    st.subheader("🔑 Chave API Gemini - Necessária para o Sermão")
-    st.info("Insira sua chave API do Gemini para habilitar o modo 'Accountability Mirror'. Sua chave não será salva além desta sessão.")
-    
-    api_key_input = st.text_input(
-        "Sua Chave API do Gemini:", 
-        type="password", 
-        key="api_key_input_field"
-    )
-    
-    if st.button("Salvar Chave e Continuar"):
-        if api_key_input.strip():
-            st.session_state.gemini_api_key = api_key_input.strip()
-            st.toast("Chave API salva! O modo Goggins está ativado.", icon="🔥")
+# Login da API
+if 'gemini_api_key' not in st.session_state:
+    with st.container(border=True):
+        st.subheader("🔑 Chave API Gemini")
+        api_input = st.text_input("Insira sua API Key para ativar o modo Goggins:", type="password")
+        if st.button("Ativar Protocolo"):
+            st.session_state.gemini_api_key = api_input
             st.rerun()
-        else:
-            st.error("Por favor, insira uma chave válida.")
-            
-    st.stop() 
+    st.stop()
 
-# --- 3. Estrutura de Abas (Só aparece após a chave ser salva) ---
-tab1, tab2, tab3 = st.tabs(["🎯 Get After It (Hoje)", "📈 Painel de Controle", "⚙️ Gerenciar Hábitos"])
+tab1, tab2, tab3 = st.tabs(["🎯 Missões de Hoje", "📈 O Espelho (Dashboard)", "⚙️ Arsenal (Config)"])
 
-# ==============================================================================
-#                       TAB 1: REGISTRO DIÁRIO
-# ==============================================================================
+# --- TAB 1: REGISTRO DIÁRIO ---
 with tab1:
-    st.header("Missão de Hoje: Sem Desculpas.")
-    today = date.today()
+    col_main, col_sug = st.columns([0.6, 0.4])
     
-    active_habits = st.session_state.habits_df[st.session_state.habits_df['Ativo'] == True]
-
-    if active_habits.empty:
-        st.warning("Você não tem hábitos ativos. Vá para a aba 'Gerenciar Hábitos' e defina sua missão!")
-    
-    for _, row in active_habits.iterrows():
-        habit = row['Hábito']
-        atomic_unit = row['Unidade Atômica']
+    with col_main:
+        st.header("Não Pare Quando Estiver Cansado.")
+        active_habits = st.session_state.habits_df[st.session_state.habits_df['Ativo'] == True]
         
-        st.subheader(f"💪 {habit}")
-        st.info(f"👉 **Unidade Atômica Mínima:** *{atomic_unit}*")
+        if active_habits.empty:
+            st.info("Nenhuma missão ativa. Adicione hábitos na aba Arsenal.")
         
-        col1, col2 = st.columns([0.2, 0.8])
-        
-        existing_record = st.session_state.records_df[
-            (st.session_state.records_df['Data'].dt.date == today) & 
-            (st.session_state.records_df['Hábito'] == habit)
-        ]
-        
-        if not existing_record.empty:
-            status = existing_record['Status'].iloc[0]
-            comment = existing_record['Comentários'].iloc[0]
-            
-            if status == 'Concluído':
-                st.success(f"✅ **CONCLUÍDO HOJE!** Você fez o que devia. *({comment})*")
-            else:
-                st.error(f"❌ **FALHOU HOJE.** Olhe para o espelho. Seu sermão está abaixo.")
-                st.code(comment, language='markdown')
-            st.markdown("---")
-            continue
-
-        # Formulário de Registro Rápido
-        with col1:
-            if st.button("✅ Concluído", key=f"done_{habit}", type="primary"):
-                new_record = {'Data': today, 'Hábito': habit, 'Status': 'Concluído', 'Comentários': 'Nenhuma desculpa, apenas trabalho.'}
-                st.session_state.records_df = pd.concat([st.session_state.records_df, pd.DataFrame([new_record])], ignore_index=True)
-                st.rerun()
-
-        with col2:
-            # Formulário de Falha com Geração de Sermão
-            with st.expander("❌ Registrar Falha e Receber Sermão"):
-                with st.form(key=f"fail_form_{habit}"):
-                    st.write(f"**Qual foi a desculpa para não fazer {habit}?** Seja brutalmente honesto.")
-                    excuse_input = st.text_area("Desculpa (Obrigatório):", height=50)
-                    
-                    if st.form_submit_button("Gerar Sermão e Registrar Falha 📉"):
-                        if excuse_input:
-                            with st.spinner("Gerando Sermão e Punição..."):
-                                sermon_and_punishment = generate_sermon(
-                                    habit, 
-                                    excuse_input, 
-                                    st.session_state.gemini_api_key
-                                )
-                            
-                            new_record = {'Data': today, 'Hábito': habit, 'Status': 'Falhou', 'Comentários': sermon_and_punishment}
-                            st.session_state.records_df = pd.concat([st.session_state.records_df, pd.DataFrame([new_record])], ignore_index=True)
+        for _, row in active_habits.iterrows():
+            habit = row['Hábito']
+            with st.expander(f"💪 {habit}", expanded=True):
+                st.write(f"Mínimo aceitável: `{row['Unidade Atômica']}`")
+                
+                # Verifica se já registrou hoje
+                reg_hoje = st.session_state.records_df[
+                    (st.session_state.records_df['Data'].dt.date == date.today()) & 
+                    (st.session_state.records_df['Hábito'] == habit)
+                ]
+                
+                if not reg_hoje.empty:
+                    st.success("Registrado!")
+                else:
+                    c1, c2 = st.columns(2)
+                    if c1.button("✅ Concluído", key=f"done_{habit}"):
+                        new_rec = {'Data': date.today(), 'Hábito': habit, 'Status': 'Concluído', 'Comentários': 'Trabalho feito.'}
+                        st.session_state.records_df = pd.concat([st.session_state.records_df, pd.DataFrame([new_rec])], ignore_index=True)
+                        # Gerar Upgrade
+                        with st.spinner("Goggins está analisando seu progresso..."):
+                            st.session_state.suggestion = generate_next_level_suggestion(habit, st.session_state.gemini_api_key)
+                        st.rerun()
+                        
+                    if c2.button("❌ Falhei", key=f"fail_{habit}"):
+                        motivo = st.text_input("Qual sua desculpa?", key=f"exc_{habit}")
+                        if motivo:
+                            prompt = f"Usuário falhou em '{habit}' porque '{motivo}'. Dê um sermão curto e uma punição física agressiva em português estilo Goggins."
+                            sermon = call_gemini(prompt, st.session_state.gemini_api_key)
+                            new_rec = {'Data': date.today(), 'Hábito': habit, 'Status': 'Falhou', 'Comentários': sermon}
+                            st.session_state.records_df = pd.concat([st.session_state.records_df, pd.DataFrame([new_rec])], ignore_index=True)
                             st.rerun()
-                        else:
-                            st.warning("Você deve registrar o porquê falhou para receber a punição.")
-        
-        st.markdown("---")
 
-# ==============================================================================
-#                       TAB 2: PAINEL DE CONTROLE E RELATÓRIO
-# ==============================================================================
+    with col_sug:
+        if st.session_state.suggestion:
+            st.subheader("⚡ PRÓXIMO NÍVEL")
+            with st.container(border=True):
+                st.markdown(st.session_state.suggestion)
+                if st.button("🔥 ACEITAR NOVA MISSÃO"):
+                    linhas = st.session_state.suggestion.split('\n')
+                    n, m = "Nova Missão", "Mínimo"
+                    for l in linhas:
+                        if "NOME:" in l: n = l.split("NOME:")[1].strip()
+                        if "MINIMO:" in l: m = l.split("MINIMO:")[1].strip()
+                    
+                    new_h = pd.DataFrame([{'Hábito': n, 'Unidade Atômica': m, 'Ativo': True}])
+                    st.session_state.habits_df = pd.concat([st.session_state.habits_df, new_h], ignore_index=True)
+                    st.session_state.suggestion = None
+                    st.toast("Missão adicionada ao Arsenal!")
+                    st.rerun()
+                if st.button("Dispensar"):
+                    st.session_state.suggestion = None
+                    st.rerun()
+
+# --- TAB 2: DASHBOARD ---
 with tab2:
-    st.header("📈 Seu Desempenho: O Espelho da Responsabilidade")
-    
-    if st.session_state.records_df.empty:
-        st.info("Ainda não há registros de hábitos. Comece a rastrear!")
-    else:
-        # --- Relatório Semanal ---
-        st.subheader("🔥 Análise Semanal (IA)")
-        if st.button("Gerar Relatório Semanal de Responsabilidade", type="primary"):
-            with st.spinner("Gerando Análise Brutal..."):
-                report = generate_weekly_report(st.session_state.gemini_api_key, st.session_state.records_df)
-            
-            st.markdown("### Relatório de Desempenho (Últimos 7 Dias)")
-            st.code(report, language='markdown')
-        
-        st.markdown("---")
-
-        # --- Tabela de Streaks ---
-        st.subheader("Sequências (Streaks)")
+    st.header("📈 Estatísticas de Guerra")
+    if not st.session_state.records_df.empty:
+        # Streaks
         streak_data = []
-        for habit in st.session_state.habits_df[st.session_state.habits_df['Ativo'] == True]['Hábito']:
-            current_s, best_s = calculate_streak(st.session_state.records_df, habit)
-            streak_data.append({
-                'Hábito': habit,
-                '🔥 Sequência Atual': current_s,
-                '🏆 Melhor Sequência': best_s
-            })
+        for h in st.session_state.habits_df['Hábito']:
+            curr, best = calculate_streak(st.session_state.records_df, h)
+            streak_data.append({"Hábito": h, "Atual 🔥": curr, "Recorde 🏆": best})
+        st.table(pd.DataFrame(streak_data))
+        
+        # Relatório Semanal IA
+        if st.button("Gerar Relatório de Elite"):
+            prompt = f"Analise estes dados e dê um veredito brutal: {st.session_state.records_df.tail(20).to_string()}"
+            st.code(call_gemini(prompt, st.session_state.gemini_api_key))
+    else:
+        st.info("Sem dados para exibir.")
 
-        st.table(pd.DataFrame(streak_data).set_index('Hábito'))
-        
-        st.markdown("---")
-        
-        # --- Gráfico de Sucesso Mensal ---
-        st.subheader("Taxa de Sucesso nos Últimos 30 Dias")
-        last_30_days = date.today() - timedelta(days=30)
-        recent_records = st.session_state.records_df[st.session_state.records_df['Data'].dt.date >= last_30_days].copy()
-        
-        if not recent_records.empty:
-            success_rate = recent_records.groupby('Hábito')['Status'].value_counts(normalize=True).mul(100).rename('Percentual').reset_index()
-            success_rate_pivot = success_rate.pivot_table(index='Hábito', columns='Status', values='Percentual', fill_value=0)
-            
-            if 'Concluído' not in success_rate_pivot.columns:
-                 success_rate_pivot['Concluído'] = 0
-
-            st.bar_chart(success_rate_pivot[['Concluído']].sort_values(by='Concluído', ascending=False), 
-                         use_container_width=True)
-        else:
-            st.info("Dados insuficientes nos últimos 30 dias para gerar o gráfico.")
-            
-        st.markdown("---")
-        
-        # --- Exportar para Excel ---
-        st.subheader("💾 Exportar Dados")
-        df_xlsx = to_excel(st.session_state.habits_df, st.session_state.records_df)
-        st.download_button(
-            label="Baixar Histórico Completo em Excel (.xlsx)",
-            data=df_xlsx,
-            file_name=f'RegistroHabitos_Export_{date.today().strftime("%Y%m%d")}.xlsx',
-            mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-
-# ==============================================================================
-#                       TAB 3: GERENCIAR HÁBITOS
-# ==============================================================================
+# --- TAB 3: ARSENAL (GERENCIAMENTO) ---
 with tab3:
-    st.header("⚙️ Gerenciar Minhas Missões (Hábitos)")
-
-    # --- Importar Dados de Excel ---
-    st.subheader("📥 Importar Dados de Excel")
-    st.info("Você pode importar hábitos (aba 'Habits') e/ou histórico (aba 'RegistroHabitos') de um arquivo Excel. Os dados importados serão mesclados com os existentes, substituindo duplicatas pela última entrada.")
+    st.header("⚙️ Gerenciar Missões")
     
-    uploaded_file = st.file_uploader("Escolha um arquivo Excel (.xlsx)", type="xlsx", key="excel_uploader")
-    
-    if uploaded_file:
-        try:
-            xls = pd.ExcelFile(uploaded_file)
-            
-            # --- Importar Hábitos ---
-            if 'Habits' in xls.sheet_names:
-                df_habits = xls.parse('Habits')
-                required_cols = ['Hábito', 'Unidade Atômica', 'Ativo']
-                
-                if all(col in df_habits.columns for col in required_cols):
-                    df_habits['Ativo'] = df_habits['Ativo'].astype(bool)
-                    # Concatena e remove duplicatas com base no 'Hábito'
-                    st.session_state.habits_df = pd.concat([st.session_state.habits_df, df_habits]).drop_duplicates(subset=['Hábito'], keep='last').reset_index(drop=True)
-                    st.success(f"Hábitos importados com sucesso! {len(df_habits)} entradas processadas.")
-                else:
-                    st.error(f"A aba 'Habits' deve conter as colunas: {', '.join(required_cols)}.")
-
-            # --- Importar Registros ---
-            if 'RegistroHabitos' in xls.sheet_names:
-                df_records = xls.parse('RegistroHabitos')
-                
-                required_cols_records = ['Data', 'Hábito', 'Status', 'Comentários']
-                if all(col in df_records.columns for col in required_cols_records):
-                    df_records['Data'] = pd.to_datetime(df_records['Data'], errors='coerce')
-                    # Remove linhas com data inválida
-                    df_records.dropna(subset=['Data'], inplace=True) 
-
-                    # Concatena e remove duplicatas com base em 'Data' e 'Hábito'
-                    st.session_state.records_df = pd.concat([st.session_state.records_df, df_records]).drop_duplicates(subset=['Data', 'Hábito'], keep='last').reset_index(drop=True)
-                    st.success(f"Registros de histórico importados com sucesso! {len(df_records)} registros processados.")
-                else:
-                    st.error(f"A aba 'RegistroHabitos' deve conter as colunas: {', '.join(required_cols_records)}.")
-            
-            st.rerun() # Recarrega após a importação para refletir as mudanças
-
-        except Exception as e:
-            st.error(f"Erro ao ler o arquivo Excel: {e}. Certifique-se de que o arquivo está no formato correto.")
-
-    st.markdown("---")
-    
-    # --- Adicionar Novo Hábito ---
-    st.subheader("➕ Adicionar Nova Missão")
-    with st.form("new_habit_form"):
-        new_habit_name = st.text_input("Nome do Hábito/Missão (Ex: Meditar 10min)")
-        new_atomic_unit = st.text_input("Unidade Atômica (O Mínimo para não quebrar a corrente. Ex: Sentar no tapete)")
-        
-        submitted = st.form_submit_button("Adicionar Hábito")
-        if submitted and new_habit_name:
-            if new_habit_name in st.session_state.habits_df['Hábito'].values:
-                st.warning("Este hábito já existe. Edite-o na tabela abaixo.")
-            else:
-                new_row = pd.DataFrame([{'Hábito': new_habit_name, 'Unidade Atômica': new_atomic_unit, 'Ativo': True}])
+    # Adicionar novo
+    with st.form("add_habit"):
+        nome = st.text_input("Nome da Missão")
+        unidade = st.text_input("Unidade Atômica (ex: Calçar o tênis)")
+        if st.form_submit_button("Adicionar"):
+            if nome:
+                new_row = pd.DataFrame([{'Hábito': nome, 'Unidade Atômica': unidade, 'Ativo': True}])
                 st.session_state.habits_df = pd.concat([st.session_state.habits_df, new_row], ignore_index=True)
-                st.success(f"Hábito '{new_habit_name}' adicionado!")
                 st.rerun()
 
-    st.markdown("---")
-
-    # --- Edição e Desativação (Usando st.data_editor) ---
-    st.subheader("📚 Lista de Hábitos Atuais")
-    st.caption("Altere a coluna 'Ativo' para pausar ou reativar um hábito.")
-    
-    # CORREÇÃO PARA O KEYERROR: GARANTIR QUE O ÍNDICE SEJA 'Hábito' MESMO SE VAZIO
+    # Editor de dados
     if not st.session_state.habits_df.empty:
-        editor_df = st.session_state.habits_df.set_index('Hábito')
-    else:
-        # Cria um DF vazio, mas define o nome do índice como 'Hábito'
-        editor_df = pd.DataFrame(columns=['Unidade Atômica', 'Ativo']) 
-        editor_df.index.name = 'Hábito' # <--- CHAVE DA CORREÇÃO
-        
-
-    edited_df = st.data_editor(
-        editor_df,
-        column_order=('Ativo', 'Unidade Atômica'),
-        column_config={
-            "Ativo": st.column_config.CheckboxColumn("Ativo?", default=True),
-            "Unidade Atômica": st.column_config.TextColumn("Unidade Atômica Mínima", help="O Mínimo para começar (Atomic Habit)")
-        },
-        hide_index=False,
-        use_container_width=True,
-        key="habit_editor"
-    )
-
-    st.session_state.habits_df = edited_df.reset_index()
-
-    st.markdown("---")
-    
-    # --- Remoção Definitiva ---
-    st.subheader("🗑️ Remover Definitivamente (Cuidado!)")
-    st.error("Remover um hábito apagará permanentemente o seu acompanhamento e histórico de registros.")
-    
-    # A linha abaixo agora é segura porque 'Hábito' é garantido no DF após a correção
-    habits_to_remove = st.session_state.habits_df['Hábito'].tolist()
-    
-    habit_to_delete = st.selectbox(
-        "Selecione o Hábito para Remoção:",
-        options=[''] + habits_to_remove,
-        key="delete_select"
-    )
-    
-    if st.button(f"🔴 REMOVER '{habit_to_delete}' (Irreversível)", disabled=(habit_to_delete == '')):
-        st.session_state.records_df = st.session_state.records_df[
-            st.session_state.records_df['Hábito'] != habit_to_delete
-        ]
-        
-        st.session_state.habits_df = st.session_state.habits_df[
-            st.session_state.habits_df['Hábito'] != habit_to_delete
-        ].reset_index(drop=True)
-        
-        st.warning(f"O Hábito '{habit_to_delete}' e todo o seu histórico foram removidos.")
-        st.rerun()
-
-# --- FIM DO APP ---
-st.markdown("---")
-st.markdown("<footer>**Stay Hard!**</footer>", unsafe_allow_html=True)
+        st.subheader("Lista de Hábitos")
+        # Correção do index para o data_editor
+        df_edit = st.session_state.habits_df.copy()
+        edited = st.data_editor(df_edit, num_rows="dynamic")
+        if st.button("Salvar Alterações"):
+            st.session_state.habits_df = edited
+            st.rerun()
